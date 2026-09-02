@@ -4,12 +4,12 @@
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
-  name: mcp-openshift-server
-  namespace: mcp-openshift-server
+  name: openshift-mcp-server
+  namespace: openshift-mcp-server
 spec:
   to:
     kind: Service
-    name: mcp-openshift-server
+    name: openshift-mcp-server
   port:
     targetPort: http
   tls:

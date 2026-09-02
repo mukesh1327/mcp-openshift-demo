@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: mcp-openshift-server
-  namespace: mcp-openshift-server
+  name: openshift-mcp-server
+  namespace: openshift-mcp-server
   labels:
-    app: mcp-openshift-server
+    app: openshift-mcp-server
 spec:
   selector:
-    app: mcp-openshift-server
+    app: openshift-mcp-server
   ports:
     - name: http
       port: 80

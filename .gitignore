@@ -1,13 +1,17 @@
-# Build artifacts
-/bin/
-/dist/
-mcp-openshift-server
-mcp-openshift-server.exe
-
-# Go
-*.test
-*.out
-vendor/
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # Editor / OS
 .vscode/
@@ -16,7 +20,12 @@ vendor/
 .DS_Store
 Thumbs.db
 
+# Local tool state
+.claude/settings.local.json
+
 # Local env / secrets
 .env
 *.local.yaml
 kubeconfig
+clusters*.yaml
+!deploy/clusters.example.yaml

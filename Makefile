@@ -1,46 +1,34 @@
-BINARY := mcp-openshift-server
-IMAGE  := mcp-openshift-server
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
-BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+IMAGE ?= openshift-mcp-server
+TAG   ?= dev
+CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || echo docker)
+PY ?= python
 
-LDFLAGS := -s -w \
-	-X mcp-openshift-server/internal/version.Version=$(VERSION) \
-	-X mcp-openshift-server/internal/version.Commit=$(COMMIT) \
-	-X mcp-openshift-server/internal/version.BuildDate=$(BUILD_DATE)
-
-.PHONY: build
-build:
-	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/mcp-openshift-server
+.PHONY: install
+install:
+	$(PY) -m pip install -e ".[dev]"
 
 .PHONY: test
 test:
-	go test ./... -race -count=1
+	$(PY) -m pytest -q
 
 .PHONY: lint
 lint:
-	golangci-lint run
+	$(PY) -m ruff check src/ tests/
+	$(PY) -m ruff format --check src/ tests/
 
 .PHONY: fmt
 fmt:
-	gofmt -l -w .
+	$(PY) -m ruff check --fix src/ tests/
+	$(PY) -m ruff format src/ tests/
 
 .PHONY: run
-run: build
-	./bin/$(BINARY) -transport=stdio
+run:
+	$(PY) -m openshift_mcp --transport stdio
 
 .PHONY: run-http
-run-http: build
-	./bin/$(BINARY) -transport=http -http-addr=:8080
+run-http:
+	$(PY) -m openshift_mcp --transport http --host 127.0.0.1 --port 8080
 
-.PHONY: docker-build
-docker-build:
-	docker build \
-		--build-arg VERSION=$(VERSION) \
-		--build-arg COMMIT=$(COMMIT) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
-		-t $(IMAGE):$(VERSION) .
-
-.PHONY: clean
-clean:
-	rm -rf bin/
+.PHONY: image
+image:
+	$(CONTAINER_ENGINE) build -f Containerfile -t $(IMAGE):$(TAG) .

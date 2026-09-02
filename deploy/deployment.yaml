@@ -1,39 +1,48 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mcp-openshift-server
-  namespace: mcp-openshift-server
+  name: openshift-mcp-server
+  namespace: openshift-mcp-server
   labels:
-    app: mcp-openshift-server
+    app: openshift-mcp-server
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: mcp-openshift-server
+      app: openshift-mcp-server
   template:
     metadata:
       labels:
-        app: mcp-openshift-server
+        app: openshift-mcp-server
     spec:
-      serviceAccountName: mcp-openshift-server
+      serviceAccountName: openshift-mcp-server
       automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: mcp-openshift-server
-          image: mcp-openshift-server:latest # replace with your built/pushed image
-          args: ["-transport=http", "-http-addr=:8080"]
+        - name: openshift-mcp-server
+          image: openshift-mcp-server:latest # replace with your built/pushed image
+          args: ["--transport", "http", "--host", "0.0.0.0", "--port", "8080"]
           env:
-            - name: MCP_LOG_FORMAT
-              value: json
-            # Uncomment to restrict this deployment to read-only tools:
+            - name: MCP_LOG_LEVEL
+              value: INFO
+            # Restrict this deployment to read-only tools:
             # - name: MCP_READ_ONLY
             #   value: "true"
+            # Target external clusters instead of the pod's own ServiceAccount:
+            # mount a kubeconfig Secret and point KUBECONFIG at it. Each context
+            # in it becomes selectable via the `context` tool argument.
+            # - name: KUBECONFIG
+            #   value: /etc/mcp/kubeconfig
           ports:
             - name: http
               containerPort: 8080
+          # volumeMounts:
+          #   - name: kubeconfig
+          #     mountPath: /etc/mcp
+          #     readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -54,7 +63,11 @@ spec:
           resources:
             requests:
               cpu: 50m
-              memory: 64Mi
+              memory: 96Mi
             limits:
               cpu: 500m
-              memory: 256Mi
+              memory: 384Mi
+      # volumes:
+      #   - name: kubeconfig
+      #     secret:
+      #       secretName: openshift-mcp-kubeconfig
