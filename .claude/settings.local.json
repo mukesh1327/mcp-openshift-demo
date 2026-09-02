@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod *)",
+      "Bash(go get *)",
+      "Bash(go version *)",
+      "Bash(go test *)",
+      "Bash(go list *)",
+      "Read(//c/Users/mugic/go/pkg/mod/github.com/openshift/client-go@v0.0.0-20260810202730-ddca5e0b7146/**)",
+      "Bash(echo \"--- apps ---\")",
+      "Read(//c/Users/mugic/go/pkg/mod/github.com/openshift/client-go@v0.0.0-20260810202730-ddca5e0b7146/apps/clientset/versioned/**)",
+      "Bash(echo \"--- route ---\")",
+      "Read(//c/Users/mugic/go/pkg/mod/github.com/openshift/client-go@v0.0.0-20260810202730-ddca5e0b7146/route/clientset/versioned/**)",
+      "Bash(head -40 C:/Users/mugic/go/pkg/mod/github.com/openshift/client-go@v0.0.0-20260810202730-ddca5e0b7146/route/clientset/versioned/clientset.go)",
+      "Bash(echo \"--- apps typed ---\")",
+      "Bash(grep -r 'type AppsV1Interface' C:/Users/mugic/go/pkg/mod/github.com/openshift/client-go@v0.0.0-20260810202730-ddca5e0b7146/apps/clientset/versioned/typed)",
+      "Bash(echo \"--- build typed ---\")",
+      "Bash(grep -r 'type BuildV1Interface' C:/Users/mugic/go/pkg/mod/github.com/openshift/client-go@v0.0.0-20260810202730-ddca5e0b7146/build/clientset/versioned/typed)",
+      "Bash(echo \"--- image typed ---\")"
+    ]
+  }
+}

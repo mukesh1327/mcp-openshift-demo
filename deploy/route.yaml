@@ -1,0 +1,17 @@
+# Optional: only needed if the HTTP transport must be reachable from outside
+# the cluster. Uses edge TLS termination; switch to reencrypt/passthrough if
+# you terminate TLS in the server itself.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: mcp-openshift-server
+  namespace: mcp-openshift-server
+spec:
+  to:
+    kind: Service
+    name: mcp-openshift-server
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

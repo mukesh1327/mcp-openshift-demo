@@ -1,0 +1,22 @@
+# Build artifacts
+/bin/
+/dist/
+mcp-openshift-server
+mcp-openshift-server.exe
+
+# Go
+*.test
+*.out
+vendor/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local env / secrets
+.env
+*.local.yaml
+kubeconfig

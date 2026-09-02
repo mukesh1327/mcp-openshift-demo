@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-openshift-server
+  namespace: mcp-openshift-server
+  labels:
+    app: mcp-openshift-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-openshift-server
+  template:
+    metadata:
+      labels:
+        app: mcp-openshift-server
+    spec:
+      serviceAccountName: mcp-openshift-server
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp-openshift-server
+          image: mcp-openshift-server:latest # replace with your built/pushed image
+          args: ["-transport=http", "-http-addr=:8080"]
+          env:
+            - name: MCP_LOG_FORMAT
+              value: json
+            # Uncomment to restrict this deployment to read-only tools:
+            # - name: MCP_READ_ONLY
+            #   value: "true"
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

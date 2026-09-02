@@ -1,0 +1,16 @@
+# Optional, NOT applied by default. Only needed if you want the
+# namespaces_list/namespaces_get and projects_list/projects_get tools to see
+# across the whole cluster rather than being limited to namespaces the
+# ServiceAccount otherwise has a Role in. Grants read-only, cluster-scoped
+# access to namespace/project listing only — nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-openshift-server-projects
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["project.openshift.io"]
+    resources: ["projects"]
+    verbs: ["get", "list", "watch"]

@@ -1,0 +1,57 @@
+# Namespaced Role granting exactly the verbs the server's tools use, in the
+# namespace(s) you bind it to (see rolebinding.yaml). Scope this to every
+# namespace the server should be able to operate on — bind it per-namespace,
+# or promote to a ClusterRole + ClusterRoleBinding if the server should
+# operate cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-openshift-server
+  namespace: mcp-openshift-server
+rules:
+  # Core Kubernetes read tools: pods_list/get/logs, services_list/get,
+  # events_list, replicasets_list/get.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+
+  # deployments_list/get, plus deployments_scale/restart (safe writes).
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["update", "patch"]
+
+  # OpenShift read-only tools: routes, imagestreams, builds.
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["image.openshift.io"]
+    resources: ["imagestreams"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["build.openshift.io"]
+    resources: ["builds"]
+    verbs: ["get", "list", "watch"]
+
+  # deploymentconfigs_list/get, plus deploymentconfigs_scale/restart.
+  - apiGroups: ["apps.openshift.io"]
+    resources: ["deploymentconfigs"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["apps.openshift.io"]
+    resources: ["deploymentconfigs/scale"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["apps.openshift.io"]
+    resources: ["deploymentconfigs/instantiate"]
+    verbs: ["create"]
+
+  # buildconfigs_list/get, plus buildconfigs_trigger.
+  - apiGroups: ["build.openshift.io"]
+    resources: ["buildconfigs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["build.openshift.io"]
+    resources: ["buildconfigs/instantiate"]
+    verbs: ["create"]
