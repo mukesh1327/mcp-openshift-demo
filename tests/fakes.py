@@ -13,17 +13,20 @@ class FakeCluster:
     def __init__(self, name: str = "default", *, openshift: bool = True) -> None:
         self.name = name
         self.is_openshift = openshift
-        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
-        self.raise_on: dict[str, BaseException] = {}
-        self.objects: dict[tuple[str, str | None], dict[str, Any]] = {}
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []  # every op, in order
+        self.raise_on: dict[str, BaseException] = {}  # op name -> exception to raise from it
+        self.objects: dict[tuple[str, str | None], dict[str, Any]] = {}  # (kind, ns) -> canned get
 
     def _record(self, op: str, *args: Any, **kwargs: Any) -> None:
+        # Log the call for assertions, then optionally simulate a cluster failure.
         self.calls.append((op, args, kwargs))
         if op in self.raise_on:
             raise self.raise_on[op]
 
     def list(self, api_version: str, kind: str, **kwargs: Any) -> dict[str, Any]:
         self._record("list", api_version, kind, **kwargs)
+        # The single item carries managedFields + a noise annotation on purpose,
+        # so tests can assert sanitize() stripped them.
         return {
             "apiVersion": api_version,
             "kind": f"{kind}List",
@@ -87,6 +90,8 @@ class FakeCluster:
 
 
 def api_exception(status: int, message: str = "boom") -> ApiException:
+    """A kubernetes ApiException shaped like a real one (status + Status JSON body),
+    for testing errors.tool_error's status-code mapping."""
     exc = ApiException(status=status, reason=message)
     exc.body = f'{{"message": "{message}"}}'
     return exc

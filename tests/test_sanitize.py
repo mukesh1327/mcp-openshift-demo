@@ -1,3 +1,5 @@
+"""sanitize: managedFields / noise-annotation stripping on objects and lists."""
+
 from __future__ import annotations
 
 from openshift_mcp.sanitize import sanitize

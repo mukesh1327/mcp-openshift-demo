@@ -11,12 +11,17 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from typing import Any
 
+# Toolsets enabled when the user passes no --toolsets flag, and the full set of
+# names the flag will accept. Keep both in sync with toolsets/__init__.py:KNOWN.
 DEFAULT_TOOLSETS = ("core", "config", "openshift")
 KNOWN_TOOLSETS = ("core", "config", "openshift")
 
+# Every environment variable we read is MCP_<FIELD> (e.g. MCP_TRANSPORT -> transport).
 _ENV_PREFIX = "MCP_"
 
 
+# Immutable so it can be shared freely between threads (tool calls run
+# concurrently); every attribute below is also a CLI flag and an MCP_* env var.
 @dataclass(frozen=True, slots=True)
 class Config:
     # transport
@@ -46,6 +51,9 @@ class Config:
     log_level: str = "INFO"
 
     def validate(self) -> None:
+        # Called once after the merged Config is built (see load()). Raises
+        # ValueError on any out-of-range / unknown value so cli.py can exit 2
+        # with a readable message instead of failing deep inside a tool call.
         if self.transport not in ("stdio", "http"):
             raise ValueError(f"invalid transport {self.transport!r}: must be 'stdio' or 'http'")
         if self.transport == "http" and not self.host:
@@ -77,14 +85,20 @@ _FIELD_NAMES = {f.name for f in fields(Config)}
 
 
 def _coerce(name: str, raw: Any) -> Any:
-    """Coerce a string (from env/TOML) to the dataclass field's type."""
+    """Coerce a raw value to the dataclass field's type.
+
+    Env vars arrive as strings and TOML values as their TOML type, but `Config`
+    wants ``int`` / ``bool`` / ``tuple[str, ...]``. CLI flags are already typed by
+    argparse, so this is a no-op for them.
+    """
     if name in ("port", "list_limit", "log_max_lines", "request_timeout"):
         return int(raw)
     if name in ("read_only", "disable_destructive", "in_cluster"):
-        if isinstance(raw, bool):
+        if isinstance(raw, bool):  # TOML booleans / argparse flags pass straight through
             return raw
         return str(raw).strip().lower() in ("1", "true", "yes", "on")
     if name == "toolsets":
+        # accept both "core,config" (env/CLI) and ["core", "config"] (TOML array)
         if isinstance(raw, str):
             return tuple(t.strip() for t in raw.split(",") if t.strip())
         return tuple(raw)
@@ -94,11 +108,13 @@ def _coerce(name: str, raw: Any) -> Any:
 
 
 def _from_toml(path: str) -> dict[str, Any]:
+    """Read a --config TOML file into a dict of Config kwargs (unknown keys dropped)."""
     with open(path, "rb") as fh:
         data = tomllib.load(fh)
-    # allow either a flat table or a [server] table
+    # Accept either a flat table (transport = "http") or a [server] table.
     if "server" in data and isinstance(data["server"], Mapping):
         data = data["server"]
+    # TOML keys may use dashes (list-limit); Config fields use underscores.
     return {
         k.replace("-", "_"): _coerce(k.replace("-", "_"), v)
         for k, v in data.items()
@@ -107,25 +123,29 @@ def _from_toml(path: str) -> dict[str, Any]:
 
 
 def _from_env(environ: Mapping[str, str]) -> dict[str, Any]:
+    """Pull MCP_<FIELD> variables out of the environment into Config kwargs."""
     out: dict[str, Any] = {}
     for key, value in environ.items():
         if not key.startswith(_ENV_PREFIX):
             continue
-        name = key[len(_ENV_PREFIX) :].lower()
+        name = key[len(_ENV_PREFIX) :].lower()  # MCP_LOG_LEVEL -> "log_level"
         if name in _FIELD_NAMES:
             out[name] = _coerce(name, value)
-    # honour the conventional KUBECONFIG too
+    # Also honour the conventional KUBECONFIG (no MCP_ prefix) unless MCP_KUBECONFIG won.
     if "KUBECONFIG" in environ and "kubeconfig" not in out:
         out["kubeconfig"] = environ["KUBECONFIG"]
     return out
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    # Every argument uses default=argparse.SUPPRESS so a flag the user did NOT
+    # pass is simply absent from the parsed namespace. That is what lets load()
+    # layer CLI over env over TOML: a missing flag never overwrites a lower layer
+    # with a default value.
     p = argparse.ArgumentParser(
         prog="openshift-mcp-server",
         description="MCP server exposing OpenShift/Kubernetes cluster operations as tools.",
     )
-    # argparse.SUPPRESS defaults: only keys the user actually passed appear in the namespace
     p.add_argument("--config", help="path to a TOML config file", default=argparse.SUPPRESS)
     p.add_argument(
         "--transport",
@@ -185,20 +205,26 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def load(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = None) -> Config:
-    """Resolve a Config from CLI args and the environment."""
+    """Resolve a Config by merging, lowest precedence first:
+    dataclass defaults < TOML (--config) < environment (MCP_*) < CLI flags.
+    ``argv``/``environ`` are injectable so tests don't touch the real process.
+    """
     environ = os.environ if environ is None else environ
     ns = vars(_build_parser().parse_args(argv))
 
+    # Start empty and .update() each layer in order; the last writer wins.
     values: dict[str, Any] = {}
-    config_path = ns.pop("config", None)
+    config_path = ns.pop("config", None)  # --config is not a Config field itself
     if config_path:
         values.update(_from_toml(config_path))
     values.update(_from_env(environ))
+    # Only real Config fields from the namespace (drops anything argparse-only).
     values.update({k: v for k, v in ns.items() if k in _FIELD_NAMES})
 
+    # --toolsets from argparse is still the raw "a,b,c" string at this point.
     if "toolsets" in values and isinstance(values["toolsets"], str):
         values["toolsets"] = _coerce("toolsets", values["toolsets"])
 
     cfg = Config(**values)
-    cfg.validate()
+    cfg.validate()  # raises ValueError -> cli.main() turns it into exit code 2
     return cfg

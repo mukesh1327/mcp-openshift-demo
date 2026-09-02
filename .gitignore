@@ -29,3 +29,7 @@ Thumbs.db
 kubeconfig
 clusters*.yaml
 !deploy/clusters.example.yaml
+
+./tmp
+tmp/pass.txt
+tmp/notes.txt

@@ -1,3 +1,5 @@
+"""config.load: defaults, the TOML < env < CLI precedence chain, and validation."""
+
 from __future__ import annotations
 
 import dataclasses

@@ -1,3 +1,5 @@
+"""ClusterManager: context resolution, lazy caching, and describe()/probe()."""
+
 from __future__ import annotations
 
 import pytest

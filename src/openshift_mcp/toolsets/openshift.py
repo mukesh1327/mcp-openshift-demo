@@ -21,6 +21,9 @@ Ctx = Annotated[
     Field(description="target context name (see contexts_list); omit for the default context"),
 ]
 
+# Setting this template annotation to a fresh value is exactly what
+# `kubectl rollout restart` does - it changes the pod spec hash, triggering a
+# rolling replacement without touching replicas or the image.
 _RESTART_ANNOTATION = "kubectl.kubernetes.io/restartedAt"
 
 
@@ -29,6 +32,9 @@ def register(server: Any, deps: Deps) -> None:
     mgr = deps.manager
 
     def _client(context: str | None) -> Any:
+        # Same as core's _client, plus an OpenShift gate: these tools use
+        # OpenShift-only APIs, so refuse early (with a clear message) on a
+        # plain-Kubernetes context rather than returning a raw 404 later.
         try:
             client = mgr.get(context or None)
         except KeyError as exc:
@@ -36,7 +42,7 @@ def register(server: Any, deps: Deps) -> None:
         try:
             openshift = client.is_openshift
         except Exception:
-            openshift = True
+            openshift = True  # probe failed/inconclusive - don't block the call
         if not openshift:
             name = context or mgr.default_context
             raise ToolError(
@@ -49,8 +55,12 @@ def register(server: Any, deps: Deps) -> None:
         return serialize(payload, cfg.list_output)
 
     def projects_list(context: Ctx = None) -> str:
-        """List OpenShift Projects visible to the credentials (respects project
-        visibility, unlike listing Namespaces)."""
+        """List OpenShift Projects visible to the credentials.
+
+        Prefer this over `resources_list Namespace`: the projects API filters to
+        what the caller may see, whereas listing Namespaces needs cluster-wide
+        read and returns everything.
+        """
         client = _client(context)
         try:
             payload = client.list(
@@ -92,6 +102,7 @@ def register(server: Any, deps: Deps) -> None:
         annotations=_RO,
     )
 
+    # --read-only stops here; the two write tools below are not registered.
     if cfg.read_only:
         return
 
@@ -105,6 +116,7 @@ def register(server: Any, deps: Deps) -> None:
         """Trigger a rolling restart by touching the pod template's restart
         annotation (like ``kubectl rollout restart``). Does not change replicas."""
         client = _client(context)
+        # A new timestamp every call guarantees the annotation actually changes.
         stamp = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         patch = {"spec": {"template": {"metadata": {"annotations": {_RESTART_ANNOTATION: stamp}}}}}
         try:
@@ -124,12 +136,14 @@ def register(server: Any, deps: Deps) -> None:
         """Start a new Build from a BuildConfig (like ``oc start-build``).
         Creates exactly one Build; does not modify the BuildConfig."""
         client = _client(context)
+        # A BuildRequest POSTed to buildconfigs/<name>/instantiate is the API
+        # behind `oc start-build`; the cluster creates one Build and returns it.
         body: dict[str, Any] = {
             "kind": "BuildRequest",
             "apiVersion": "build.openshift.io/v1",
             "metadata": {"name": name},
         }
-        if commit_ref:
+        if commit_ref:  # build a specific git revision instead of the BuildConfig default
             body["revision"] = {"type": "Git", "git": {"commit": commit_ref}}
         try:
             payload = client.instantiate(

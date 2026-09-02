@@ -16,10 +16,15 @@ from pydantic import Field
 from ..errors import ToolError, tool_error
 from . import Deps, clamp_limit, clamp_tail, serialize
 
+# MCP annotations are advisory hints a client can surface in its UI (e.g. warn
+# before a destructive call). They do NOT enforce anything - the real gates are
+# whether a tool is registered at all (see cfg.read_only / cfg.disable_destructive).
 _RO = ToolAnnotations(read_only_hint=True)
 _WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False)
 _DESTRUCTIVE = ToolAnnotations(read_only_hint=False, destructive_hint=True)
 
+# Reusable, pre-described parameter types so every tool documents `context`,
+# `kind`, `api_version`, `namespace` identically to the model.
 Ctx = Annotated[
     str | None,
     Field(description="target context name (see contexts_list); omit for the default context"),
@@ -37,19 +42,29 @@ Namespace = Annotated[
 
 
 def register(server: Any, deps: Deps) -> None:
+    """Register the core tools, honoring --read-only and --disable-destructive.
+
+    Structure: read tools first (always), then `return` if read_only; then the
+    non-destructive writes, then `return` if disable_destructive; then delete.
+    """
     cfg = deps.cfg
     mgr = deps.manager
 
+    # -- helpers shared by every tool below --
+
     def _client(context: str | None) -> Any:
+        # Resolve the optional `context` arg to a ClusterClient up front so a bad
+        # name fails with a clean message before we attempt any cluster call.
         try:
             return mgr.get(context or None)
         except KeyError as exc:
             raise tool_error("selecting cluster", exc) from exc
 
     def _out(payload: Any) -> str:
+        # Every tool returns through here: sanitize + JSON/YAML per --list-output.
         return serialize(payload, cfg.list_output)
 
-    # ---- reads -----------------------------------------------------------
+    # ---- reads (always registered) -------------------------------------
 
     def resources_list(
         kind: Kind,
@@ -68,7 +83,11 @@ def register(server: Any, deps: Deps) -> None:
         ] = None,
         context: Ctx = None,
     ) -> str:
-        """List resources of any kind, optionally filtered by namespace and selectors."""
+        """List resources of any kind, optionally filtered by namespace and selectors.
+
+        Generic over GVK: `kind="Pod"` + `api_version="v1"`, or
+        `kind="Route"` + `api_version="route.openshift.io/v1"`, etc.
+        """
         client = _client(context)
         try:
             payload = client.list(
@@ -81,6 +100,7 @@ def register(server: Any, deps: Deps) -> None:
                 continue_token=continue_token,
             )
         except Exception as exc:
+            # Any cluster/network failure -> a readable ToolError for the model.
             raise tool_error(f"listing {kind}", exc) from exc
         return _out(payload)
 
@@ -138,7 +158,11 @@ def register(server: Any, deps: Deps) -> None:
         limit: Annotated[int | None, Field(description="max events, most recent first")] = None,
         context: Ctx = None,
     ) -> str:
-        """List recent events in a namespace, most recent first."""
+        """List recent events in a namespace, most recent first.
+
+        The API returns events unordered, so we fetch up to --list-limit of them,
+        sort newest-first here, then truncate to the caller's `limit`.
+        """
         client = _client(context)
         try:
             payload = client.list(
@@ -146,7 +170,7 @@ def register(server: Any, deps: Deps) -> None:
                 "Event",
                 namespace=namespace,
                 field_selector=field_selector,
-                limit=clamp_limit(None, cfg),
+                limit=clamp_limit(None, cfg),  # pull the full cap, we re-sort below
             )
         except Exception as exc:
             raise tool_error(f"listing events in namespace {namespace}", exc) from exc
@@ -163,10 +187,11 @@ def register(server: Any, deps: Deps) -> None:
     ):
         server.add_tool(fn, name=name, description=desc, annotations=_RO)
 
+    # GATE 1: --read-only stops here - no write tool is ever registered.
     if cfg.read_only:
         return
 
-    # ---- non-destructive writes ----------------------------------------
+    # ---- non-destructive writes (apply / scale) ----------------------
 
     def resources_apply(
         manifest: Annotated[
@@ -177,6 +202,8 @@ def register(server: Any, deps: Deps) -> None:
     ) -> str:
         """Create or update a resource via server-side apply."""
         client = _client(context)
+        # Validate the manifest shape here so the error names the missing piece
+        # instead of failing with a cryptic KeyError deep in ClusterClient.apply.
         name = manifest.get("metadata", {}).get("name") if isinstance(manifest, dict) else None
         if (
             not isinstance(manifest, dict)
@@ -197,6 +224,8 @@ def register(server: Any, deps: Deps) -> None:
         ],
         name: Annotated[str, Field(description="workload name")],
         namespace: Annotated[str, Field(description="namespace containing the workload")],
+        # ge/le bound the value at the schema layer: the model literally cannot
+        # ask for -1 or 100000 replicas.
         replicas: Annotated[int, Field(description="desired replica count (>= 0)", ge=0, le=500)],
         api_version: ApiVersion = "apps/v1",
         context: Ctx = None,
@@ -204,6 +233,7 @@ def register(server: Any, deps: Deps) -> None:
         """Scale a workload to an explicit replica count."""
         client = _client(context)
         try:
+            # Merge-patch just spec.replicas - leaves the rest of the spec alone.
             payload = client.patch(
                 api_version, kind, name, namespace, {"spec": {"replicas": replicas}}
             )
@@ -226,10 +256,12 @@ def register(server: Any, deps: Deps) -> None:
         ),
     )
 
+    # GATE 2: --disable-destructive (default ON) stops here.
+    # resources_delete is only registered with --no-disable-destructive.
     if cfg.disable_destructive:
         return
 
-    # ---- destructive --------------------------------------------------
+    # ---- destructive (opt-in only) ----------------------------------
 
     def resources_delete(
         kind: Kind,
@@ -255,6 +287,11 @@ def register(server: Any, deps: Deps) -> None:
 
 
 def _event_timestamp(event: dict[str, Any]) -> str:
+    """Best-available timestamp for sorting events newest-first.
+
+    Different Event API versions / paths populate different fields, so fall
+    through them in order of preference; "" sorts such events oldest.
+    """
     return (
         event.get("lastTimestamp")
         or event.get("eventTime")

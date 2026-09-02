@@ -26,7 +26,8 @@ STREAMABLE_HTTP_PATH = "/mcp"
 
 
 def configure_logging(cfg: Config) -> logging.Logger:
-    # stdio transport uses stdout for the protocol stream, so logs go to stderr.
+    # stdio transport uses stdout for the JSON-RPC stream, so ALL logging must go
+    # to stderr - a stray line on stdout would corrupt the protocol.
     logging.basicConfig(
         stream=sys.stderr,
         level=getattr(logging, cfg.log_level, logging.INFO),
@@ -36,24 +37,31 @@ def configure_logging(cfg: Config) -> logging.Logger:
 
 
 def build_server(cfg: Config, manager: ClusterManager, *, log: logging.Logger) -> Any:
+    # Imported lazily so `--help` / config errors don't pay the MCP import cost.
     from mcp.server.mcpserver import MCPServer
 
     server = MCPServer(
         name="openshift-mcp-server",
         version=__version__,
-        instructions=_INSTRUCTIONS,
+        instructions=_INSTRUCTIONS,  # shown to the model so it knows which tool to reach for
     )
+    # register_all inspects cfg (toolsets, read_only, disable_destructive) and
+    # only attaches the tools that configuration permits.
     register_all(server, Deps(manager=manager, cfg=cfg, log=log))
     return server
 
 
 def _add_health_routes(server: Any, manager: ClusterManager, log: logging.Logger) -> None:
+    """Attach /healthz and /readyz to the HTTP transport (used by the k8s probes)."""
     from starlette.responses import PlainTextResponse
 
+    # Liveness: the process is up and serving. Never touches the cluster.
     @server.custom_route("/healthz", methods=["GET"])
     async def healthz(_request: Any) -> Any:
         return PlainTextResponse("ok")
 
+    # Readiness: can we actually reach the default cluster's API right now?
+    # The k8s client call is blocking, so run it off the event loop.
     @server.custom_route("/readyz", methods=["GET"])
     async def readyz(_request: Any) -> Any:
         try:
@@ -65,6 +73,7 @@ def _add_health_routes(server: Any, manager: ClusterManager, log: logging.Logger
 
 
 def run(cfg: Config) -> None:
+    """Wire everything together and block serving the chosen transport."""
     log = configure_logging(cfg)
     log.info(
         "starting openshift-mcp-server %s (transport=%s, read_only=%s, toolsets=%s)",
@@ -79,14 +88,17 @@ def run(cfg: Config) -> None:
     # can never hang a tool call indefinitely.
     socket.setdefaulttimeout(cfg.request_timeout)
 
+    # Resolves credentials + enumerates contexts now, but does NOT open any
+    # cluster connection - ClusterClients are built lazily on first tool call.
     manager = ClusterManager.from_config(cfg)
     log.info("contexts: %s (default: %s)", ", ".join(manager.contexts()), manager.default_context)
 
     server = build_server(cfg, manager, log=log)
 
     if cfg.transport == "stdio":
-        server.run(transport="stdio")
+        server.run(transport="stdio")  # talks JSON-RPC over stdin/stdout
     else:
+        # HTTP: MCP at /mcp plus the two probe endpoints.
         _add_health_routes(server, manager, log)
         log.info(
             "http transport on %s:%s (MCP endpoint %s)", cfg.host, cfg.port, STREAMABLE_HTTP_PATH

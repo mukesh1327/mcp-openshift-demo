@@ -14,6 +14,7 @@ _RO = ToolAnnotations(read_only_hint=True)
 
 
 def register(server: Any, deps: Deps) -> None:
+    # Both tools here are always read-only, so --read-only does not affect them.
     cfg = deps.cfg
     mgr = deps.manager
 
@@ -29,11 +30,15 @@ def register(server: Any, deps: Deps) -> None:
         """List the cluster contexts this server can target. Every other tool
         takes an optional ``context`` argument naming one of these; omitting it
         uses the default context."""
+        # probe=False: names only, zero cluster I/O. probe=True: mgr.describe
+        # contacts every cluster concurrently and reports reachable/openshift.
         return serialize([asdict(info) for info in mgr.describe(probe=probe)], cfg.list_output)
 
     def configuration_view() -> str:
         """Show the effective server configuration (safety mode, toolsets,
         limits, default context)."""
+        # Lets the model (and the user) see which safety gates are active without
+        # reading the process args - e.g. "is this server read-only?".
         return serialize(
             {
                 "default_context": mgr.default_context,

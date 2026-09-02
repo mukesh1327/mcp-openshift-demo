@@ -1,3 +1,6 @@
+"""End-to-end tool tests: which tools register under each config, and that they
+issue the right cluster calls / map errors / sanitize output."""
+
 from __future__ import annotations
 
 import json

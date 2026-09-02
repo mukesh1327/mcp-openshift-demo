@@ -1,3 +1,5 @@
+"""errors.tool_error: mapping API status codes and network failures to messages."""
+
 from __future__ import annotations
 
 from openshift_mcp.errors import ToolError, tool_error

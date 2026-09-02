@@ -10,30 +10,37 @@ from __future__ import annotations
 
 from typing import Any
 
+# Annotations that tools write and that hold a full serialized copy of the
+# object (or a diff of it) - huge, and never useful to a model.
 NOISE_ANNOTATIONS = (
-    "kubectl.kubernetes.io/last-applied-configuration",
-    "kapp.k14s.io/original",
+    "kubectl.kubernetes.io/last-applied-configuration",  # `kubectl apply` (client-side)
+    "kapp.k14s.io/original",  # carvel kapp
     "kapp.k14s.io/original-diff-md5",
 )
 
 
 def _clean_object(obj: dict[str, Any]) -> None:
+    """Strip the noise fields from one API object, in place."""
     meta = obj.get("metadata")
     if isinstance(meta, dict):
-        meta.pop("managedFields", None)
+        meta.pop("managedFields", None)  # the biggest offender - server-side-apply bookkeeping
         annotations = meta.get("annotations")
         if isinstance(annotations, dict):
             for key in NOISE_ANNOTATIONS:
                 annotations.pop(key, None)
-            if not annotations:
+            if not annotations:  # don't leave an empty "annotations": {} behind
                 meta.pop("annotations", None)
 
 
 def sanitize(payload: Any) -> Any:
-    """Remove noise fields from a single object or a `*List` (via `.items`)."""
+    """Clean a single object or a `*List` (each entry in `.items`), in place.
+
+    Returns the same object it was given. Non-dicts (e.g. a plain log string)
+    pass straight through.
+    """
     if not isinstance(payload, dict):
         return payload
-    _clean_object(payload)
+    _clean_object(payload)  # handles the top-level object (or the List's own metadata)
     items = payload.get("items")
     if isinstance(items, list):
         for item in items:

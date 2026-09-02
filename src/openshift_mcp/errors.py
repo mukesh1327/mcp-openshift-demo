@@ -22,10 +22,12 @@ class ToolError(_MCPToolError):
 
 
 def _api_message(exc: ApiException) -> str:
+    """Pull the human-readable reason out of a Kubernetes Status error body,
+    falling back to the HTTP reason phrase."""
     body = getattr(exc, "body", None)
     if body:
         try:
-            parsed = json.loads(body)
+            parsed = json.loads(body)  # k8s returns a Status object as JSON
             if isinstance(parsed, dict) and parsed.get("message"):
                 return str(parsed["message"])
         except (ValueError, TypeError):
@@ -34,14 +36,20 @@ def _api_message(exc: ApiException) -> str:
 
 
 def tool_error(action: str, exc: BaseException) -> ToolError:
-    """Build a ToolError describing a failed cluster operation."""
+    """Map any exception a tool handler caught to a user-facing ToolError.
+
+    `action` is a short present-participle phrase ("listing Pod", "scaling web")
+    that gets prefixed to the message. Only ToolError text reaches the model;
+    every other exception type is treated by MCPServer as an internal crash.
+    """
     if isinstance(exc, ToolError):
-        return exc
+        return exc  # already shaped - don't re-wrap
     if isinstance(exc, KeyError):
         # ClusterManager.get raises KeyError for an unknown context name.
         return ToolError(f"{action}: {exc.args[0] if exc.args else exc}")
 
     if isinstance(exc, ApiException):
+        # An HTTP error from the cluster - translate the status code to advice.
         status = exc.status
         if status == 404:
             return ToolError(f"{action}: not found")
@@ -63,9 +71,11 @@ def tool_error(action: str, exc: BaseException) -> ToolError:
             return ToolError(f"{action}: the cluster API is rate-limiting requests, retry later")
         return ToolError(f"{action}: cluster API error {status}: {_api_message(exc)}")
 
+    # Network-level failures (never got an HTTP response back).
     if isinstance(exc, (Urllib3TimeoutError, socket.timeout, TimeoutError)):
         return ToolError(f"{action}: timed out waiting for the cluster to respond")
     if isinstance(exc, MaxRetryError):
         return ToolError(f"{action}: could not reach the cluster API ({exc.reason})")
 
+    # LookupError from ClusterClient (unknown kind), ValueError, etc.
     return ToolError(f"{action}: {exc}")
