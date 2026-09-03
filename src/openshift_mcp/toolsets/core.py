@@ -53,15 +53,18 @@ def register(server: Any, deps: Deps) -> None:
     # -- helpers shared by every tool below --
 
     def _client(context: str | None) -> Any:
-        # Resolve the optional `context` arg to a ClusterClient up front so a bad
-        # name fails with a clean message before we attempt any cluster call.
+        """Resolve the optional `context` arg to a ClusterClient.
+
+        Done up front in every handler so a bad context name (or missing
+        credentials) fails with a clean ToolError before any cluster call.
+        """
         try:
             return mgr.get(context or None)
         except KeyError as exc:
             raise tool_error("selecting cluster", exc) from exc
 
     def _out(payload: Any) -> str:
-        # Every tool returns through here: sanitize + JSON/YAML per --list-output.
+        """Sanitize and render a cluster object as the tool's text result (JSON/YAML)."""
         return serialize(payload, cfg.list_output)
 
     # ---- reads (always registered) -------------------------------------
@@ -175,10 +178,12 @@ def register(server: Any, deps: Deps) -> None:
         except Exception as exc:
             raise tool_error(f"listing events in namespace {namespace}", exc) from exc
         items = payload.get("items", [])
-        items.sort(key=_event_timestamp, reverse=True)
+        items.sort(key=_event_timestamp, reverse=True)  # newest first
+        # Now that they're ordered, cut to what the caller actually asked for.
         payload["items"] = items[: clamp_limit(limit, cfg)]
         return _out(payload)
 
+    # Register the four reads in one loop - all share the read-only annotation.
     for fn, name, desc in (
         (resources_list, "resources_list", "Read-only. List resources of any kind."),
         (resources_get, "resources_get", "Read-only. Get one resource of any kind."),
@@ -206,12 +211,12 @@ def register(server: Any, deps: Deps) -> None:
         # instead of failing with a cryptic KeyError deep in ClusterClient.apply.
         name = manifest.get("metadata", {}).get("name") if isinstance(manifest, dict) else None
         if (
-            not isinstance(manifest, dict)
-            or not all(manifest.get(k) for k in ("apiVersion", "kind"))
-            or not name
+            not isinstance(manifest, dict)  # model sent a string / list
+            or not all(manifest.get(k) for k in ("apiVersion", "kind"))  # missing GVK
+            or not name  # no metadata.name -> server-side apply can't address it
         ):
             raise ToolError("applying resource: manifest needs apiVersion, kind and metadata.name")
-        ident = f"{manifest['kind']}/{name}"
+        ident = f"{manifest['kind']}/{name}"  # for the error message, e.g. "Deployment/web"
         try:
             payload = client.apply(manifest)
         except Exception as exc:
@@ -251,6 +256,7 @@ def register(server: Any, deps: Deps) -> None:
         resources_scale,
         name="resources_scale",
         description="Write. Scale a workload to an explicit replica count.",
+        # idempotent_hint: applying the same replica count twice is a no-op
         annotations=ToolAnnotations(
             read_only_hint=False, destructive_hint=False, idempotent_hint=True
         ),

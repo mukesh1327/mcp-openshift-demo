@@ -20,6 +20,7 @@ from .fakes import FakeCluster
 
 @pytest.fixture
 def fake_cluster() -> FakeCluster:
+    # A fresh recorder per test - inspect .calls, seed .raise_on / .objects.
     return FakeCluster()
 
 
@@ -42,6 +43,7 @@ def build(manager: ClusterManager, cfg: Config) -> MCPServer:
 
 @pytest.fixture
 def make_server(manager: ClusterManager):
+    # Returns a factory so a test can pass its own Config (read_only, toolsets, ...).
     def _make(cfg: Config | None = None) -> MCPServer:
         return build(manager, cfg or Config())
 

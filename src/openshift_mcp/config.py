@@ -20,10 +20,15 @@ KNOWN_TOOLSETS = ("core", "config", "openshift")
 _ENV_PREFIX = "MCP_"
 
 
-# Immutable so it can be shared freely between threads (tool calls run
-# concurrently); every attribute below is also a CLI flag and an MCP_* env var.
 @dataclass(frozen=True, slots=True)
 class Config:
+    """The server's fully-resolved runtime settings.
+
+    Immutable so it can be shared freely between threads (tool calls run
+    concurrently); every attribute below is also a CLI flag and an ``MCP_*``
+    env var. Build one with ``load()`` - never instantiate directly outside tests.
+    """
+
     # transport
     transport: str = "stdio"  # "stdio" | "http"
     host: str = "127.0.0.1"
@@ -51,15 +56,21 @@ class Config:
     log_level: str = "INFO"
 
     def validate(self) -> None:
-        # Called once after the merged Config is built (see load()). Raises
-        # ValueError on any out-of-range / unknown value so cli.py can exit 2
-        # with a readable message instead of failing deep inside a tool call.
+        """Reject any out-of-range or unknown value with a ``ValueError``.
+
+        Called once after the merged Config is built (see ``load()``); the
+        ``ValueError`` propagates to ``cli.main`` which exits 2 with a readable
+        message, instead of the bad value failing deep inside a later tool call.
+        """
+        # transport: the only two the MCP package's server.run() understands here
         if self.transport not in ("stdio", "http"):
             raise ValueError(f"invalid transport {self.transport!r}: must be 'stdio' or 'http'")
+        # host/port only matter for http, but validate them whenever http is selected
         if self.transport == "http" and not self.host:
             raise ValueError("host must not be empty for the http transport")
         if not 1 <= self.port <= 65535:
             raise ValueError(f"port out of range: {self.port}")
+        # every limit is later used as a positive cap / timeout - 0 or negative is nonsense
         for value, name in (
             (self.list_limit, "list_limit"),
             (self.log_max_lines, "log_max_lines"),
@@ -67,13 +78,14 @@ class Config:
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
+        # catch a typo'd toolset name now rather than silently registering nothing
         unknown = set(self.toolsets) - set(KNOWN_TOOLSETS)
         if unknown:
             raise ValueError(
                 f"unknown toolset(s): {', '.join(sorted(unknown))}; "
                 f"known: {', '.join(KNOWN_TOOLSETS)}"
             )
-        if not self.toolsets:
+        if not self.toolsets:  # e.g. --toolsets "" - the server would expose no tools
             raise ValueError("at least one toolset must be enabled")
         if self.list_output not in ("json", "yaml"):
             raise ValueError(f"invalid list_output {self.list_output!r}: must be 'json' or 'yaml'")
@@ -81,6 +93,8 @@ class Config:
             raise ValueError(f"invalid log_level {self.log_level!r}")
 
 
+# Set of valid Config attribute names - used to filter env/TOML/CLI keys before
+# they reach Config(**values), so an unrecognised key is dropped, not an error.
 _FIELD_NAMES = {f.name for f in fields(Config)}
 
 
@@ -91,8 +105,10 @@ def _coerce(name: str, raw: Any) -> Any:
     wants ``int`` / ``bool`` / ``tuple[str, ...]``. CLI flags are already typed by
     argparse, so this is a no-op for them.
     """
+    # integer fields: int("30") from env, int(30) from TOML - both fine
     if name in ("port", "list_limit", "log_max_lines", "request_timeout"):
         return int(raw)
+    # boolean fields: accept the usual truthy spellings from a string env var
     if name in ("read_only", "disable_destructive", "in_cluster"):
         if isinstance(raw, bool):  # TOML booleans / argparse flags pass straight through
             return raw
@@ -138,10 +154,13 @@ def _from_env(environ: Mapping[str, str]) -> dict[str, Any]:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    # Every argument uses default=argparse.SUPPRESS so a flag the user did NOT
-    # pass is simply absent from the parsed namespace. That is what lets load()
-    # layer CLI over env over TOML: a missing flag never overwrites a lower layer
-    # with a default value.
+    """Construct the CLI parser (one argument per Config field, plus ``--config``).
+
+    Every argument uses ``default=argparse.SUPPRESS`` so a flag the user did NOT
+    pass is simply absent from the parsed namespace. That is what lets ``load()``
+    layer CLI over env over TOML: a missing flag never overwrites a lower layer
+    with a default value.
+    """
     p = argparse.ArgumentParser(
         prog="openshift-mcp-server",
         description="MCP server exposing OpenShift/Kubernetes cluster operations as tools.",
@@ -210,6 +229,7 @@ def load(argv: Sequence[str] | None = None, environ: Mapping[str, str] | None = 
     ``argv``/``environ`` are injectable so tests don't touch the real process.
     """
     environ = os.environ if environ is None else environ
+    # ns holds ONLY the flags actually passed (default=SUPPRESS on every argument)
     ns = vars(_build_parser().parse_args(argv))
 
     # Start empty and .update() each layer in order; the last writer wins.

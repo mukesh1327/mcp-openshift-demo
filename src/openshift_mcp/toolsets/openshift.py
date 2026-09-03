@@ -28,22 +28,30 @@ _RESTART_ANNOTATION = "kubectl.kubernetes.io/restartedAt"
 
 
 def register(server: Any, deps: Deps) -> None:
+    """Register the OpenShift tools (reads always; the two writes only without --read-only).
+
+    Every handler here goes through the OpenShift-gated ``_client`` below, so a
+    call against a plain-Kubernetes context fails fast with a clear message.
+    """
     cfg = deps.cfg
     mgr = deps.manager
 
     def _client(context: str | None) -> Any:
-        # Same as core's _client, plus an OpenShift gate: these tools use
-        # OpenShift-only APIs, so refuse early (with a clear message) on a
-        # plain-Kubernetes context rather than returning a raw 404 later.
+        """Resolve `context` to a ClusterClient, refusing non-OpenShift clusters.
+
+        Same as core's ``_client``, plus an OpenShift gate: these tools use
+        OpenShift-only APIs, so refuse early (with a clear message) on a
+        plain-Kubernetes context rather than returning a raw 404 later.
+        """
         try:
-            client = mgr.get(context or None)
+            client = mgr.get(context or None)  # bad name / no creds -> KeyError
         except KeyError as exc:
             raise tool_error("selecting cluster", exc) from exc
         try:
-            openshift = client.is_openshift
+            openshift = client.is_openshift  # one cached probe of route.openshift.io
         except Exception:
             openshift = True  # probe failed/inconclusive - don't block the call
-        if not openshift:
+        if not openshift:  # definitively plain Kubernetes -> these tools can't work
             name = context or mgr.default_context
             raise ToolError(
                 f"context {name!r} is not an OpenShift cluster "
@@ -52,6 +60,7 @@ def register(server: Any, deps: Deps) -> None:
         return client
 
     def _out(payload: Any) -> str:
+        """Sanitize and render a cluster object as the tool's text result."""
         return serialize(payload, cfg.list_output)
 
     def projects_list(context: Ctx = None) -> str:
@@ -116,8 +125,10 @@ def register(server: Any, deps: Deps) -> None:
         """Trigger a rolling restart by touching the pod template's restart
         annotation (like ``kubectl rollout restart``). Does not change replicas."""
         client = _client(context)
-        # A new timestamp every call guarantees the annotation actually changes.
+        # A new timestamp every call guarantees the annotation actually changes,
+        # which changes the pod-template hash and makes the controller roll pods.
         stamp = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Sparse patch: only spec.template.metadata.annotations[...] is touched.
         patch = {"spec": {"template": {"metadata": {"annotations": {_RESTART_ANNOTATION: stamp}}}}}
         try:
             payload = client.patch(api_version, kind, name, namespace, patch)
@@ -141,11 +152,12 @@ def register(server: Any, deps: Deps) -> None:
         body: dict[str, Any] = {
             "kind": "BuildRequest",
             "apiVersion": "build.openshift.io/v1",
-            "metadata": {"name": name},
+            "metadata": {"name": name},  # must match the BuildConfig being instantiated
         }
         if commit_ref:  # build a specific git revision instead of the BuildConfig default
             body["revision"] = {"type": "Git", "git": {"commit": commit_ref}}
         try:
+            # POST .../buildconfigs/<name>/instantiate -> the cluster returns the new Build
             payload = client.instantiate(
                 "build.openshift.io/v1", "BuildConfig", "instantiate", name, namespace, body
             )

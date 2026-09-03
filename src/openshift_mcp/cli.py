@@ -16,6 +16,7 @@ def main(argv: list[str] | None = None) -> int:
       1 - the server crashed at runtime
       0 - clean shutdown, including Ctrl-C
     """
+    # Phase 1 - build config. Failures here are the user's mistake, not a bug.
     try:
         cfg = load(argv)
     except (ValueError, OSError) as exc:
@@ -23,15 +24,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"openshift-mcp-server: {exc}", file=sys.stderr)
         return 2
 
+    # Phase 2 - run the server. run() blocks until the transport closes.
     try:
-        run(cfg)  # blocks here serving the transport until interrupted
+        run(cfg)
     except KeyboardInterrupt:
-        return 0
+        return 0  # Ctrl-C is a normal way to stop a stdio server
     except Exception as exc:
+        # Anything else escaping run() is a genuine crash; print it and fail.
         print(f"openshift-mcp-server: {exc}", file=sys.stderr)
         return 1
     return 0
 
 
 if __name__ == "__main__":
+    # `python src/openshift_mcp/cli.py` - map the int return to the process exit code.
     raise SystemExit(main())

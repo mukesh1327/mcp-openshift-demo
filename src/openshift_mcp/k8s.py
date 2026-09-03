@@ -99,6 +99,7 @@ class ClusterClient:
     """
 
     def __init__(self, name: str, api_client: k8s_client.ApiClient, request_timeout: int) -> None:
+        """Wrap a configured ``ApiClient``; no network call happens until first use."""
         self.name = name  # context name this client is bound to
         self._api = api_client
         self._timeout = request_timeout
@@ -119,11 +120,14 @@ class ClusterClient:
         content_type: str | None = None,
         timeout: float | tuple[float, float] | None = None,
     ) -> Any:
-        # Single choke point for every REST call: one place that sets the bearer
-        # auth, the timeout, and JSON handling. _preload_content=False keeps
-        # urllib3 from trying to deserialize with a generated model class.
+        """Make one REST call and return the parsed JSON body (``{}`` if empty).
+
+        Single choke point for every request: one place that sets the bearer
+        auth, the timeout, and JSON handling. ``_preload_content=False`` keeps
+        urllib3 from trying to deserialize with a generated model class.
+        """
         headers = {"Accept": "application/json"}
-        if content_type:
+        if content_type:  # only set on writes (apply/merge-patch/JSON POST)
             headers["Content-Type"] = content_type
         resp = self._api.call_api(
             path,
@@ -132,16 +136,18 @@ class ClusterClient:
             query or [],
             headers,
             body=body,
-            auth_settings=["BearerToken"],
-            _preload_content=False,
-            _return_http_data_only=True,
+            auth_settings=["BearerToken"],  # use the token from the loaded kubeconfig
+            _preload_content=False,  # give us the raw response, not a generated model
+            _return_http_data_only=True,  # ...and just the body, not (data, status, headers)
+            # per-call override wins, else the manager-wide timeout
             _request_timeout=timeout if timeout is not None else self._timeout,
         )
         raw = resp.data
-        return json.loads(raw) if raw else {}
+        return json.loads(raw) if raw else {}  # 204 No Content (e.g. some deletes) -> {}
 
     def _api_root(self, api_version: str) -> str:
-        # Core group ("v1") lives under /api; every other group under /apis.
+        """Map an apiVersion to its URL root: core group ("v1") lives under
+        ``/api``; every group version ("apps/v1", ...) under ``/apis``."""
         return f"/api/{api_version}" if "/" not in api_version else f"/apis/{api_version}"
 
     def _resource_meta(self, api_version: str, kind: str) -> dict[str, Any]:
@@ -152,8 +158,10 @@ class ClusterClient:
         installed into an already-seen group after startup needs a restart.
         """
         table = self._res_cache.get(api_version)
-        if table is None:
+        if table is None:  # first time we touch this group version - fetch its resource list
             data = self._request("GET", self._api_root(api_version))
+            # Index by Kind; several entries can share a Kind (a resource and its
+            # subresources), so drop subresources - their "name" has a slash.
             table = {
                 r["kind"]: r
                 for r in data.get("resources", [])
@@ -161,7 +169,7 @@ class ClusterClient:
             }
             self._res_cache[api_version] = table
         meta = table.get(kind)
-        if meta is None:
+        if meta is None:  # kind genuinely absent, or the group version is wrong
             raise LookupError(f"{kind} ({api_version}) is not served by this cluster")
         return meta
 
@@ -182,13 +190,15 @@ class ClusterClient:
 
     @property
     def is_openshift(self) -> bool:
-        if self._openshift is None:
+        """Whether this cluster serves the OpenShift API groups (probed once, then cached)."""
+        if self._openshift is None:  # not probed yet
             self._openshift = self._probe_openshift(self._timeout)
         return self._openshift
 
     def _probe_openshift(self, timeout: float | tuple[float, float]) -> bool:
-        # Presence of the route.openshift.io group == this is OpenShift.
+        """Probe for the ``route.openshift.io`` group; its presence == OpenShift."""
         try:
+            # A 2xx here means the group exists -> OpenShift.
             self._request("GET", "/apis/route.openshift.io/v1", timeout=timeout)
             self._openshift = True
         except k8s_client.exceptions.ApiException as exc:
@@ -207,15 +217,16 @@ class ClusterClient:
         early with the error string if the cluster can't be reached at all.
         """
         try:
-            self._request("GET", "/version", timeout=timeout)
+            self._request("GET", "/version", timeout=timeout)  # unauthenticated reachability check
         except Exception as exc:
-            return False, None, str(exc)
+            return False, None, str(exc)  # can't even reach it - report why
         try:
-            return True, self._probe_openshift(timeout), None
+            return True, self._probe_openshift(timeout), None  # reachable + classified
         except Exception:
             return True, None, None  # reachable, but couldn't classify it
 
     def server_version(self) -> dict[str, Any]:
+        """Return the cluster's ``/version`` payload (also the readiness-probe call)."""
         return self._request("GET", "/version")
 
     # ---- resource operations ------------------------------------------
@@ -231,9 +242,12 @@ class ClusterClient:
         limit: int | None = None,
         continue_token: str | None = None,
     ) -> dict[str, Any]:
-        # Translate the keyword args into Kubernetes list query params. `namespace`
-        # is None -> _path omits the namespace segment -> lists across all namespaces.
+        """GET a ``<kind>List``. `namespace=None` lists across all namespaces
+        (``_path`` omits the namespace segment); the other args map to the
+        standard list query params."""
         query: list[tuple[str, Any]] = []
+        # Each arg becomes a query param only when set - an empty selector would
+        # match nothing, and limit=0 means "no limit" which we never want here.
         if label_selector:
             query.append(("labelSelector", label_selector))
         if field_selector:
@@ -242,24 +256,30 @@ class ClusterClient:
             query.append(("limit", limit))
         if continue_token:  # opaque token from a previous response's metadata.continue
             query.append(("continue", continue_token))
+        # name=None -> _path stops at the plural, i.e. this is a collection GET
         return self._request("GET", self._path(api_version, kind, None, namespace), query=query)
 
     def get(
         self, api_version: str, kind: str, name: str, *, namespace: str | None = None
     ) -> dict[str, Any]:
+        """GET a single named resource."""
         return self._request("GET", self._path(api_version, kind, name, namespace))
 
     def apply(self, manifest: dict[str, Any]) -> dict[str, Any]:
-        # Server-side apply: a PATCH with the apply content-type. `force=true`
-        # takes ownership of fields another manager set, so re-applying a tweaked
-        # manifest doesn't 409 on a field-manager conflict.
+        """Server-side apply a full manifest (a PATCH with the apply content-type).
+
+        ``force=true`` takes ownership of fields another manager set, so
+        re-applying a tweaked manifest doesn't 409 on a field-manager conflict.
+        """
         meta = manifest.get("metadata", {})
+        # Address the object from its own apiVersion/kind/metadata (caller-supplied).
         path = self._path(
             manifest["apiVersion"], manifest["kind"], meta.get("name"), meta.get("namespace")
         )
         return self._request(
             "PATCH",
             path,
+            # fieldManager tags the fields we own; force=true resolves conflicts in our favour
             query=[("fieldManager", _FIELD_MANAGER), ("force", "true")],
             body=manifest,
             content_type="application/apply-patch+yaml",  # JSON body is valid apply-patch YAML
@@ -268,6 +288,7 @@ class ClusterClient:
     def delete(
         self, api_version: str, kind: str, name: str, *, namespace: str | None = None
     ) -> dict[str, Any]:
+        """DELETE a single named resource."""
         return self._request("DELETE", self._path(api_version, kind, name, namespace))
 
     def patch(
@@ -278,9 +299,9 @@ class ClusterClient:
         namespace: str | None,
         merge_patch: dict[str, Any],
     ) -> dict[str, Any]:
-        # JSON merge patch (RFC 7386): the body is a sparse object merged into the
-        # resource. Used by resources_scale ({"spec": {"replicas": n}}) and
-        # workloads_restart (touch a template annotation).
+        """Apply a JSON merge patch (RFC 7386): `merge_patch` is a sparse object
+        merged into the resource. Used by ``resources_scale`` and
+        ``workloads_restart``."""
         return self._request(
             "PATCH",
             self._path(api_version, kind, name, namespace),
@@ -297,8 +318,8 @@ class ClusterClient:
         namespace: str | None,
         body: dict[str, Any],
     ) -> dict[str, Any]:
-        # POST to an action subresource, e.g.
-        # .../buildconfigs/<name>/instantiate  (builds_trigger -> a new Build).
+        """POST `body` to an action subresource, e.g.
+        ``.../buildconfigs/<name>/instantiate`` (``builds_trigger`` -> a new Build)."""
         path = self._path(api_version, kind, name, namespace) + f"/{subresource}"
         return self._request("POST", path, body=body, content_type="application/json")
 
@@ -312,10 +333,13 @@ class ClusterClient:
         previous: bool = False,
         since_seconds: int | None = None,
     ) -> str:
-        # The pods/log subresource returns plain text, not JSON, so this bypasses
-        # _request and asks for text/plain directly.
+        """Fetch a pod's container logs as plain text.
+
+        The ``pods/log`` subresource returns text, not JSON, so this bypasses
+        ``_request`` and asks for ``text/plain`` directly.
+        """
         query: list[tuple[str, Any]] = []
-        if container:
+        if container:  # required when the pod has more than one container
             query.append(("container", container))
         if tail_lines:
             query.append(("tailLines", tail_lines))
@@ -323,6 +347,7 @@ class ClusterClient:
             query.append(("previous", "true"))
         if since_seconds:
             query.append(("sinceSeconds", since_seconds))
+        # call_api directly (not _request): this endpoint returns text/plain, not JSON
         resp = self._api.call_api(
             f"/api/v1/namespaces/{namespace}/pods/{name}/log",
             "GET",
@@ -339,6 +364,9 @@ class ClusterClient:
 
 @dataclass(frozen=True, slots=True)
 class ContextInfo:
+    """One row of ``contexts_list`` output: a kubeconfig context and, when
+    ``probe=true`` was passed, what probing it found."""
+
     name: str
     default: bool
     reachable: bool | None = None  # None = not probed
@@ -359,6 +387,11 @@ class ClusterManager:
 
     Empty name -> the default context. Building/caching is concurrency-safe;
     a failed build is not cached, so a transiently-unreachable cluster recovers.
+
+    The kubeconfig is re-read whenever the file changes on disk (see
+    ``_maybe_reload``), so an ``oc login`` after the server started - a fresh
+    login, a switched context, or a refreshed token - is picked up automatically
+    with no restart.
     """
 
     def __init__(
@@ -369,18 +402,32 @@ class ClusterManager:
         kubeconfig: str | None,
         in_cluster: bool,
         request_timeout: int,
+        unavailable_reason: str | None = None,
+        cfg: Any = None,
     ) -> None:
-        if not contexts:
-            raise ValueError("no contexts configured")
-        if default_context not in contexts:
-            raise ValueError(f"default context {default_context!r} is not one of {contexts}")
-        self._order = list(contexts)
+        """Store the resolved context list. Prefer the ``from_*`` classmethods.
+
+        ``unavailable_reason`` set: the server has no usable credentials (no
+        kubeconfig, unreadable file, ...). Construct anyway so the MCP client
+        stays connected; cluster tools raise a clean error until it is fixed.
+        ``cfg`` is kept so the kubeconfig can be re-resolved later on change.
+        """
+        if unavailable_reason is None:  # a "real" manager - the invariants must hold
+            if not contexts:
+                raise ValueError("no contexts configured")
+            if default_context not in contexts:
+                raise ValueError(f"default context {default_context!r} is not one of {contexts}")
+        self._order = list(contexts)  # context names, in kubeconfig order
         self._default = default_context
-        self._kubeconfig = kubeconfig
+        self._kubeconfig = kubeconfig  # path (or None for in-cluster) - passed to _build
         self._in_cluster = in_cluster
         self._timeout = request_timeout
-        self._clients: dict[str, ClusterClient] = {}
-        self._lock = threading.Lock()
+        self._unavailable_reason = unavailable_reason
+        self._cfg = cfg  # kept for _maybe_reload; None for from_clients (tests)
+        self._clients: dict[str, ClusterClient] = {}  # context -> client, filled on first use
+        self._lock = threading.Lock()  # guards _clients (tool calls run on many threads)
+        # fingerprint of the kubeconfig file(s) now, so _maybe_reload can spot a change
+        self._kubeconfig_sig = self._kubeconfig_signature() if cfg is not None else None
 
     @classmethod
     def from_config(cls, cfg: Any) -> ClusterManager:
@@ -395,24 +442,85 @@ class ClusterManager:
                 in_cluster=True,
                 request_timeout=cfg.request_timeout,
             )
-        # Otherwise: every context in the kubeconfig is selectable.
-        raw, active = k8s_config.list_kube_config_contexts(config_file=cfg.kubeconfig)
-        names = [c["name"] for c in raw]
-        if not names:
-            raise ValueError("kubeconfig has no contexts")
-        # Default context: --context wins, else the file's current-context, else the first.
-        default = cfg.context or (active or {}).get("name") or names[0]
-        if default not in names:
-            raise ValueError(
-                f"context {default!r} not found in kubeconfig (have: {', '.join(names)})"
-            )
+        # Otherwise: every context in the kubeconfig is selectable. A missing or
+        # broken kubeconfig is not fatal - start in the "unavailable" state (the
+        # MCP client stays connected) and recover on the next _maybe_reload.
+        order, default, reason = cls._resolve(cfg)
         return cls(
-            names,
+            order,
             default,
             kubeconfig=cfg.kubeconfig,
             in_cluster=False,
             request_timeout=cfg.request_timeout,
+            unavailable_reason=reason,
+            cfg=cfg,
         )
+
+    @staticmethod
+    def _resolve(cfg: Any) -> tuple[list[str], str, str | None]:
+        """Read the kubeconfig -> (context names, default context, unavailable_reason).
+
+        ``unavailable_reason`` is None on success; on any failure (no file,
+        unreadable, empty, bad --context) it is the message and the two lists
+        come back empty.
+        """
+        try:
+            # (all contexts, the current-context entry) from the kubeconfig
+            raw, active = k8s_config.list_kube_config_contexts(config_file=cfg.kubeconfig)
+            names = [c["name"] for c in raw]
+            if not names:
+                raise ValueError("kubeconfig has no contexts")
+            # Default context: --context wins, else the file's current-context, else the first.
+            default = cfg.context or (active or {}).get("name") or names[0]
+            if default not in names:
+                raise ValueError(
+                    f"context {default!r} not found in kubeconfig (have: {', '.join(names)})"
+                )
+            return names, default, None
+        except Exception as exc:
+            return [], "", (str(exc) or exc.__class__.__name__)
+
+    def _kubeconfig_signature(self) -> tuple[tuple[str, float | None], ...] | None:
+        """(path, mtime-or-None) for each effective kubeconfig file.
+
+        Changes when ``oc login`` rewrites the file (new token / new context) or
+        when a previously-missing file appears. None for in-cluster mode.
+        """
+        if self._in_cluster:
+            return None
+        if self._kubeconfig:  # explicit --kubeconfig / KUBECONFIG / MCP_KUBECONFIG
+            paths = self._kubeconfig.split(os.pathsep)
+        elif os.environ.get("KUBECONFIG"):
+            paths = os.environ["KUBECONFIG"].split(os.pathsep)
+        else:
+            paths = [os.path.expanduser("~/.kube/config")]
+        out: list[tuple[str, float | None]] = []
+        for p in paths:
+            try:
+                out.append((p, os.path.getmtime(p)))
+            except OSError:
+                out.append((p, None))  # not there (yet)
+        return tuple(out)
+
+    def _maybe_reload(self) -> None:
+        """Re-resolve the kubeconfig if it changed on disk since we last looked.
+
+        Cheap (a stat per file) on the common no-change path. On a change it
+        refreshes the context list / unavailable state and drops every cached
+        client so the next call rebuilds with the current server + token.
+        """
+        if self._cfg is None or self._in_cluster:
+            return
+        sig = self._kubeconfig_signature()
+        if sig == self._kubeconfig_sig:
+            return  # unchanged - nothing to do
+        order, default, reason = self._resolve(self._cfg)
+        with self._lock:
+            self._kubeconfig_sig = sig
+            self._order = order
+            self._default = default
+            self._unavailable_reason = reason
+            self._clients.clear()  # tokens / API servers may have changed
 
     @classmethod
     def from_clients(cls, clients: dict[str, Any], default_context: str) -> ClusterManager:
@@ -424,26 +532,39 @@ class ClusterManager:
             in_cluster=False,
             request_timeout=30,
         )
-        mgr._clients = dict(clients)
+        mgr._clients = dict(clients)  # pre-populate the cache so _build is never called
         return mgr
 
     @property
     def default_context(self) -> str:
+        """Context used when a tool call omits ``context`` (``""`` when unavailable)."""
+        self._maybe_reload()
         return self._default
 
+    @property
+    def unavailable_reason(self) -> str | None:
+        """Non-None when the server has no usable cluster credentials."""
+        self._maybe_reload()
+        return self._unavailable_reason
+
     def contexts(self) -> list[str]:
+        """The selectable context names, in kubeconfig order (``[]`` when unavailable)."""
+        self._maybe_reload()
         return list(self._order)
 
     def _build(self, name: str) -> ClusterClient:
         """Construct (but do not connect) a ClusterClient for one context."""
         conf = k8s_client.Configuration()
+        # Populate `conf` (server URL, CA, token) from the right credential source...
         if self._in_cluster:
             k8s_config.load_incluster_config(client_configuration=conf)
         else:
+            # ...or from this specific kubeconfig context (not the file's current-context)
             k8s_config.load_kube_config(
                 config_file=self._kubeconfig, context=name, client_configuration=conf
             )
         conf.retries = 1  # urllib3 retries default to 3 - don't triple the latency of a dead API
+        # ApiClient is just an HTTP wrapper here; no connection opens until first request.
         return ClusterClient(name, k8s_client.ApiClient(configuration=conf), self._timeout)
 
     def get(self, context: str | None = None) -> ClusterClient:
@@ -453,16 +574,23 @@ class ClusterManager:
         into a clean message. A failed _build is NOT cached, so a cluster that was
         briefly unreachable at first use can still recover later.
         """
-        name = context or self._default
+        self._maybe_reload()  # pick up an `oc login` since startup
+        if self._unavailable_reason is not None:
+            raise KeyError(
+                f"no cluster access: {self._unavailable_reason}. Run `oc login` "
+                f"(or set --kubeconfig / --in-cluster); no server restart needed."
+            )
+        name = context or self._default  # "" / None both mean "the default context"
         if name not in self._order:
             raise KeyError(f"unknown context {name!r} (configured: {', '.join(self._order)})")
-        with self._lock:
+        with self._lock:  # fast path: already built
             cached = self._clients.get(name)
         if cached is not None:
             return cached
         built = self._build(name)  # outside the lock: building may do disk I/O
         with self._lock:
-            # setdefault: if another thread built it while we were, keep theirs.
+            # setdefault: if another thread built it while we were, keep theirs
+            # so every caller for this context shares one client (and its caches).
             self._clients.setdefault(name, built)
             return self._clients[name]
 
@@ -470,10 +598,14 @@ class ClusterManager:
         """Status of every configured context. probe=False (default) does no I/O
         - just names and which is default. probe=True checks reachability +
         OpenShift for each, concurrently and time-bounded."""
-        if not probe:
+        self._maybe_reload()  # pick up an `oc login` since startup
+        if not self._order:  # no credentials configured -> nothing to describe
+            return []
+        if not probe:  # cheap path: names + which is default, no network
             return [ContextInfo(n, n == self._default) for n in self._order]
 
         def _one(name: str) -> ContextInfo:
+            """Probe one context; never raises - failures become error rows."""
             is_default = name == self._default
             try:
                 reachable, openshift, err = self.get(name).probe(probe_timeout)

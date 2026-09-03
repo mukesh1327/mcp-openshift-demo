@@ -21,11 +21,13 @@ NOISE_ANNOTATIONS = (
 
 def _clean_object(obj: dict[str, Any]) -> None:
     """Strip the noise fields from one API object, in place."""
+    # All the noise lives under metadata; a non-dict metadata means nothing to do.
     meta = obj.get("metadata")
     if isinstance(meta, dict):
         meta.pop("managedFields", None)  # the biggest offender - server-side-apply bookkeeping
         annotations = meta.get("annotations")
         if isinstance(annotations, dict):
+            # Drop only the known full-object-copy annotations; keep the rest.
             for key in NOISE_ANNOTATIONS:
                 annotations.pop(key, None)
             if not annotations:  # don't leave an empty "annotations": {} behind
@@ -39,8 +41,9 @@ def sanitize(payload: Any) -> Any:
     pass straight through.
     """
     if not isinstance(payload, dict):
-        return payload
-    _clean_object(payload)  # handles the top-level object (or the List's own metadata)
+        return payload  # e.g. a plain pod-log string - nothing to strip
+    _clean_object(payload)  # the top-level object (or, for a *List, the List's own metadata)
+    # A *List response carries the real objects under .items - clean each of them too.
     items = payload.get("items")
     if isinstance(items, list):
         for item in items:

@@ -276,7 +276,11 @@ prefer `pipx install .` or the container image over a per-user venv path).
 
 ### Local (stdio) — Claude Desktop
 
-Claude Desktop launches the server itself; add to `claude_desktop_config.json`:
+Claude Desktop launches the server itself; open **Settings → Developer → Edit Config**
+(`claude_desktop_config.json`) and add an entry. `command` must be an **absolute path** to the
+console script in your venv — the path is platform-specific:
+
+macOS / Linux:
 
 ```json
 {
@@ -289,8 +293,25 @@ Claude Desktop launches the server itself; add to `claude_desktop_config.json`:
 }
 ```
 
-(On Windows use `.venv\\Scripts\\openshift-mcp-server.exe` with escaped backslashes.) Fully quit
-and reopen Claude Desktop.
+Windows — `Scripts\…exe`, not `bin/…`, with escaped backslashes:
+
+```json
+{
+  "mcpServers": {
+    "openshift": {
+      "command": "C:\\abs\\path\\.venv\\Scripts\\openshift-mcp-server.exe",
+      "args": ["--transport", "stdio", "--read-only", "--request-timeout", "10"]
+    }
+  }
+}
+```
+
+If the venv moves, re-run `pip install -e .` so the script points at the new source path, and
+update `command`. Then fully quit and reopen Claude Desktop. The server starts even with no
+kubeconfig (it stays connected; `configuration_view` reports `cluster_access` and cluster tools
+return a "run `oc login`" error until credentials are available). It re-reads the kubeconfig
+whenever the file changes, so a later `oc login`, context switch, or token refresh is picked up
+automatically — no Claude restart needed.
 
 ### In-cluster (HTTP)
 

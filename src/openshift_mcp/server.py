@@ -18,16 +18,21 @@ _INSTRUCTIONS = (
     "Tools for observing and operating OpenShift/Kubernetes clusters. Use "
     "`resources_list` / `resources_get` for any kind (pass kind + apiVersion), "
     "`pods_log` for container logs, `events_list` for recent events. "
-    "`contexts_list` shows which clusters are reachable; every tool takes an "
-    "optional `context` argument."
+    "`contexts_list` lists the configured cluster contexts by name only; it does "
+    "not check connectivity unless you pass `probe=true`, so a context appearing "
+    "there does not mean its cluster is reachable. Every tool takes an optional "
+    "`context` argument."
 )
 
 STREAMABLE_HTTP_PATH = "/mcp"
 
 
 def configure_logging(cfg: Config) -> logging.Logger:
-    # stdio transport uses stdout for the JSON-RPC stream, so ALL logging must go
-    # to stderr - a stray line on stdout would corrupt the protocol.
+    """Set up root logging at ``cfg.log_level`` and return the package logger.
+
+    stdio transport uses stdout for the JSON-RPC stream, so ALL logging must go
+    to stderr - a stray line on stdout would corrupt the protocol.
+    """
     logging.basicConfig(
         stream=sys.stderr,
         level=getattr(logging, cfg.log_level, logging.INFO),
@@ -37,7 +42,11 @@ def configure_logging(cfg: Config) -> logging.Logger:
 
 
 def build_server(cfg: Config, manager: ClusterManager, *, log: logging.Logger) -> Any:
-    # Imported lazily so `--help` / config errors don't pay the MCP import cost.
+    """Create the MCPServer and attach every tool that ``cfg`` permits.
+
+    Returns the server, untyped (``Any``) because the MCP package is imported
+    lazily here so ``--help`` / config errors don't pay the MCP import cost.
+    """
     from mcp.server.mcpserver import MCPServer
 
     server = MCPServer(
@@ -91,14 +100,27 @@ def run(cfg: Config) -> None:
     # Resolves credentials + enumerates contexts now, but does NOT open any
     # cluster connection - ClusterClients are built lazily on first tool call.
     manager = ClusterManager.from_config(cfg)
-    log.info("contexts: %s (default: %s)", ", ".join(manager.contexts()), manager.default_context)
+    if manager.unavailable_reason:
+        log.warning(
+            "no cluster access (%s) - starting anyway; run `oc login` (or set "
+            "--kubeconfig / --in-cluster) and it is picked up automatically, no restart",
+            manager.unavailable_reason,
+        )
+    else:
+        log.info(
+            "contexts: %s (default: %s)",
+            ", ".join(manager.contexts()),
+            manager.default_context,
+        )
 
+    # Construct the MCPServer and attach the permitted tools (still no I/O).
     server = build_server(cfg, manager, log=log)
 
     if cfg.transport == "stdio":
-        server.run(transport="stdio")  # talks JSON-RPC over stdin/stdout
+        # One client, this process's stdin/stdout. Blocks until the pipe closes.
+        server.run(transport="stdio")
     else:
-        # HTTP: MCP at /mcp plus the two probe endpoints.
+        # HTTP: the MCP endpoint at /mcp, plus /healthz + /readyz for k8s probes.
         _add_health_routes(server, manager, log)
         log.info(
             "http transport on %s:%s (MCP endpoint %s)", cfg.host, cfg.port, STREAMABLE_HTTP_PATH

@@ -11,10 +11,10 @@ from __future__ import annotations
 import json
 import socket
 
-from kubernetes.client.exceptions import ApiException
-from mcp.server.mcpserver.exceptions import ToolError as _MCPToolError
-from urllib3.exceptions import MaxRetryError
-from urllib3.exceptions import TimeoutError as Urllib3TimeoutError
+from kubernetes.client.exceptions import ApiException  # raised on any non-2xx cluster response
+from mcp.server.mcpserver.exceptions import ToolError as _MCPToolError  # our public base class
+from urllib3.exceptions import MaxRetryError  # connection refused / DNS / all retries exhausted
+from urllib3.exceptions import TimeoutError as Urllib3TimeoutError  # socket read/connect timeout
 
 
 class ToolError(_MCPToolError):
@@ -24,14 +24,16 @@ class ToolError(_MCPToolError):
 def _api_message(exc: ApiException) -> str:
     """Pull the human-readable reason out of a Kubernetes Status error body,
     falling back to the HTTP reason phrase."""
-    body = getattr(exc, "body", None)
+    body = getattr(exc, "body", None)  # the raw HTTP response body, if the client kept it
     if body:
         try:
             parsed = json.loads(body)  # k8s returns a Status object as JSON
+            # Status.message is the field kubectl prints, e.g. "pods \"x\" not found"
             if isinstance(parsed, dict) and parsed.get("message"):
                 return str(parsed["message"])
         except (ValueError, TypeError):
-            pass
+            pass  # body wasn't JSON - fall through to the reason phrase
+    # exc.reason is the HTTP status text ("Not Found"); last-resort default below
     return (exc.reason or "").strip() or "unknown error"
 
 
@@ -43,13 +45,16 @@ def tool_error(action: str, exc: BaseException) -> ToolError:
     every other exception type is treated by MCPServer as an internal crash.
     """
     if isinstance(exc, ToolError):
-        return exc  # already shaped - don't re-wrap
+        return exc  # already shaped (e.g. a manifest-validation error) - don't re-wrap
+
     if isinstance(exc, KeyError):
-        # ClusterManager.get raises KeyError for an unknown context name.
+        # ClusterManager.get raises KeyError for an unknown context / no credentials.
+        # str(KeyError) adds quotes, so unwrap args[0] to keep the message clean.
         return ToolError(f"{action}: {exc.args[0] if exc.args else exc}")
 
     if isinstance(exc, ApiException):
-        # An HTTP error from the cluster - translate the status code to advice.
+        # An HTTP error from the cluster - translate the status code to advice
+        # the model (or user) can act on rather than a bare number.
         status = exc.status
         if status == 404:
             return ToolError(f"{action}: not found")
@@ -63,12 +68,13 @@ def tool_error(action: str, exc: BaseException) -> ToolError:
                 f"{action}: unauthorized - the cluster rejected the credentials "
                 f"(the token may be expired; re-run `oc login`)"
             )
-        if status == 409:
+        if status == 409:  # optimistic-concurrency clash on resourceVersion
             return ToolError(f"{action}: conflict - the resource changed concurrently, retry")
-        if status == 422:
+        if status == 422:  # the API server rejected the object (schema / admission webhook)
             return ToolError(f"{action}: invalid request: {_api_message(exc)}")
-        if status == 429:
+        if status == 429:  # client exceeded the API priority-and-fairness budget
             return ToolError(f"{action}: the cluster API is rate-limiting requests, retry later")
+        # 500/503/... - nothing specific to advise, surface the server's own message
         return ToolError(f"{action}: cluster API error {status}: {_api_message(exc)}")
 
     # Network-level failures (never got an HTTP response back).
